@@ -118,6 +118,11 @@ func (r *ClusterRosaClassicDatasource) Schema(ctx context.Context, req datasourc
 				Description: "Enables customer cloud subscription (Immutable with ROSA)",
 				Computed:    true,
 			},
+			"delete_protection_enabled": schema.BoolAttribute{
+				Description: "enables delete protection for the cluster. Default value is false.",
+				Optional:    true,
+				Computed:    true,
+			},
 			"etcd_encryption": schema.BoolAttribute{
 				Description: "Encrypt etcd data. Note that all AWS storage is already encrypted. " + common.ValueCannotBeChangedStringDescription,
 				Computed:    true,

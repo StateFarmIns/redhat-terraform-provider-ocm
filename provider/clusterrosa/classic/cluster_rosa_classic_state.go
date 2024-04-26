@@ -34,6 +34,7 @@ type ClusterRosaClassicState struct {
 	Private                                   types.Bool                   `tfsdk:"private"`
 	Sts                                       *sts.ClassicSts              `tfsdk:"sts"`
 	CCSEnabled                                types.Bool                   `tfsdk:"ccs_enabled"`
+	DeleteProtectionEnabled                   types.Bool                   `tfsdk:"delete_protection_enabled"`
 	EtcdEncryption                            types.Bool                   `tfsdk:"etcd_encryption"`
 	AutoScalingEnabled                        types.Bool                   `tfsdk:"autoscaling_enabled"`
 	MinReplicas                               types.Int64                  `tfsdk:"min_replicas"`

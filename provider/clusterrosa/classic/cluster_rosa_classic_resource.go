@@ -178,6 +178,14 @@ func (r *ClusterRosaClassicResource) Schema(ctx context.Context, req resource.Sc
 				Description: "Enables customer cloud subscription (Immutable with ROSA)",
 				Computed:    true,
 			},
+			"delete_protection_enabled": schema.BoolAttribute{
+				Description: "enables delete protection for the cluster. Default value is false.",
+				Optional:    true,
+				Computed:    true,
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.UseStateForUnknown(),
+				},
+			},
 			"etcd_encryption": schema.BoolAttribute{
 				Description: "Encrypt etcd data. Note that all AWS storage is already encrypted. " + common.ValueCannotBeChangedStringDescription,
 				Optional:    true,
@@ -608,6 +616,13 @@ func createClassicClusterObject(ctx context.Context,
 		ccs.DisableSCPChecks(true)
 	}
 	builder.CCS(ccs)
+
+	// setting delete protection. defaults to false.
+	deleteProtectionEnabled := common.BoolWithFalseDefault(state.DeleteProtectionEnabled)
+	deleteProtection := cmv1.NewDeleteProtection()
+	deleteProtection.Enabled(deleteProtectionEnabled)
+	builder.DeleteProtection(deleteProtection)
+
 
 	ec2MetadataHttpTokens := common.OptionalString(state.Ec2MetadataHttpTokens)
 	kmsKeyARN := common.OptionalString(state.KMSKeyArn)
@@ -1076,6 +1091,14 @@ func (r *ClusterRosaClassicResource) Update(ctx context.Context, request resourc
 		clusterBuilder.DisableUserWorkloadMonitoring(plan.DisableWorkloadMonitoring.ValueBool())
 	}
 
+	_, shouldPatchDeleteProtection := common.ShouldPatchBool(state.DeleteProtectionEnabled, plan.DeleteProtectionEnabled)
+	if shouldPatchDeleteProtection {
+		deleteProtectionEnabled := common.BoolWithFalseDefault(plan.DeleteProtectionEnabled)
+		deleteProtection := cmv1.NewDeleteProtection()
+		deleteProtection.Enabled(deleteProtectionEnabled)
+		clusterBuilder.DeleteProtection(deleteProtection)
+	}
+
 	patchProperties := shouldPatchProperties(state, plan)
 	if patchProperties {
 		propertiesElements, err := rosa.ValidatePatchProperties(ctx, state.Properties, plan.Properties)
@@ -1326,8 +1349,8 @@ func updateProxy(state, plan *ClusterRosaClassicState, clusterBuilder *cmv1.Clus
 	return clusterBuilder, nil
 }
 
-func (r *ClusterRosaClassicResource) Delete(ctx context.Context, request resource.DeleteRequest,
-	response *resource.DeleteResponse) {
+func (r *ClusterRosaClassicResource) Delete(ctx context.Context, request resource.DeleteRequest, response *resource.DeleteResponse) {
+
 	tflog.Debug(ctx, "begin delete()")
 
 	// Get the state:
@@ -1338,53 +1361,65 @@ func (r *ClusterRosaClassicResource) Delete(ctx context.Context, request resourc
 		return
 	}
 
-	// Send the request to delete the cluster:
-	resource := r.ClusterCollection.Cluster(state.ID.ValueString())
-	_, err := resource.Delete().SendContext(ctx)
-	if err != nil {
+	if common.HasValue(state.DeleteProtectionEnabled) && state.DisableWaitingInDestroy.ValueBool() {
 		response.Diagnostics.AddError(
 			"Can't delete cluster",
 			fmt.Sprintf(
-				"Can't delete cluster with identifier '%s': %v",
-				state.ID.ValueString(), err,
+				"Can't delete cluster with identifier '%s'. Delete protection enabeld on the cluster: %v",
+				state.ID.ValueString(), 
 			),
 		)
 		return
-	}
-	// TODO: refactor into function so can be shared for both hcp and classic flows
-	if common.HasValue(state.DisableWaitingInDestroy) && state.DisableWaitingInDestroy.ValueBool() {
-		tflog.Info(ctx, "Waiting for destroy to be completed, is disabled")
 	} else {
-		timeout := rosa.DefaultWaitTimeoutInMinutes
-		if common.HasValue(state.DestroyTimeout) {
-			if state.DestroyTimeout.ValueInt64() <= 0 {
-				response.Diagnostics.AddWarning(rosa.NonPositiveTimeoutSummary, fmt.Sprintf(rosa.NonPositiveTimeoutFormat, state.ID.ValueString()))
-			} else {
-				timeout = state.DestroyTimeout.ValueInt64()
-			}
-		}
-		isNotFound, err := r.retryClusterNotFoundWithTimeout(3, 1*time.Minute, ctx, timeout, resource)
+		// Send the request to delete the cluster:
+		resource := r.ClusterCollection.Cluster(state.ID.ValueString())
+		_, err := resource.Delete().SendContext(ctx)
 		if err != nil {
 			response.Diagnostics.AddError(
-				"Can't poll cluster state",
+				"Can't delete cluster",
 				fmt.Sprintf(
-					"Can't poll state of cluster with identifier '%s': %v",
+					"Can't delete cluster with identifier '%s': %v",
 					state.ID.ValueString(), err,
 				),
 			)
 			return
 		}
+		// TODO: refactor into function so can be shared for both hcp and classic flows
+		if common.HasValue(state.DisableWaitingInDestroy) && state.DisableWaitingInDestroy.ValueBool() {
+			tflog.Info(ctx, "Waiting for destroy to be completed, is disabled")
+		} else {
+			timeout := rosa.DefaultWaitTimeoutInMinutes
+			if common.HasValue(state.DestroyTimeout) {
+				if state.DestroyTimeout.ValueInt64() <= 0 {
+					response.Diagnostics.AddWarning(rosa.NonPositiveTimeoutSummary, fmt.Sprintf(rosa.NonPositiveTimeoutFormat, state.ID.ValueString()))
+				} else {
+					timeout = state.DestroyTimeout.ValueInt64()
+				}
+			}
+			isNotFound, err := r.retryClusterNotFoundWithTimeout(3, 1*time.Minute, ctx, timeout, resource)
+			if err != nil {
+				response.Diagnostics.AddError(
+					"Can't poll cluster state",
+					fmt.Sprintf(
+						"Can't poll state of cluster with identifier '%s': %v",
+						state.ID.ValueString(), err,
+					),
+				)
+				return
+			}
 
-		if !isNotFound {
-			response.Diagnostics.AddWarning(
-				"Cluster wasn't deleted yet",
-				fmt.Sprintf("The cluster with identifier '%s' is not deleted yet, but the polling finished due to a timeout", state.ID.ValueString()),
-			)
+			if !isNotFound {
+				response.Diagnostics.AddWarning(
+					"Cluster wasn't deleted yet",
+					fmt.Sprintf("The cluster with identifier '%s' is not deleted yet, but the polling finished due to a timeout", state.ID.ValueString()),
+				)
+			}
+
 		}
-
+		// Remove the state:
+		response.State.RemoveResource(ctx)
 	}
-	// Remove the state:
-	response.State.RemoveResource(ctx)
+	
 }
 
 func (r *ClusterRosaClassicResource) ImportState(ctx context.Context, request resource.ImportStateRequest,
@@ -1457,6 +1492,8 @@ func populateRosaClassicClusterState(ctx context.Context, object *cmv1.Cluster, 
 	if ok && disableSCPChecks {
 		state.DisableSCPChecks = types.BoolValue(true)
 	}
+
+	state.DeleteProtectionEnabled = types.BoolValue(object.DeleteProtection().Enabled())
 
 	state.EtcdEncryption = types.BoolValue(object.EtcdEncryption())
 
